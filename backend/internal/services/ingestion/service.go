@@ -41,7 +41,6 @@ func (s *Service) Ingest(submissionID int64, repoURL string) (*IngestResult, err
 		return nil, fmt.Errorf("no files found in repo")
 	}
 
-	
 	totalSize := 0
 	for _, f := range files {
 		totalSize += len(f.Content)
@@ -49,17 +48,15 @@ func (s *Service) Ingest(submissionID int64, repoURL string) (*IngestResult, err
 
 	snapshot := &models.RepoSnapshot{
 		SubmissionID: submissionID,
-		Branch:       "main",
-		FileCount:    len(files),
+		Branch:       "main", // можно попробовать вытащить из URL или параметров, но пока так
+		FileCount:    len(files), // стоит проверить
 		TotalSize:    totalSize,
 	}
 	if err := s.snapshotRepo.CreateSnapshot(snapshot); err != nil {
 		return nil, fmt.Errorf("creating snapshot: %w", err)
 	}
 
-	
-	s.snapshotRepo.DeleteSnapshotData(snapshot.ID)
-
+	s.snapshotRepo.DeleteSnapshotData(snapshot.ID) // 
 	
 	snapshot.ProjectMap = buildProjectMap(files)
 
@@ -226,7 +223,7 @@ func buildSummary(files []services.GitHubFile, chunks []models.CodeChunk) string
 }
 
 
-
+// это можно вынести в json или yaml с паттернами для разных языков или по-другому определять язык, но пока так
 func detectLanguage(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {

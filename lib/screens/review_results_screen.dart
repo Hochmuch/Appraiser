@@ -1,56 +1,39 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import '../models/models.dart';
-import '../services/api_client.dart';
+import '../cubits/review_results_cubit.dart';
+import '../cubits/review_results_state.dart';
 
-class ReviewResultsScreen extends StatefulWidget {
-  final ApiClient apiClient;
+class ReviewResultsScreen extends StatelessWidget {
   final int submissionId;
   final VoidCallback onBack;
 
   const ReviewResultsScreen({
     super.key,
-    required this.apiClient,
     required this.submissionId,
     required this.onBack,
   });
 
   @override
-  State<ReviewResultsScreen> createState() => _ReviewResultsScreenState();
+  Widget build(BuildContext context) {
+    return BlocProvider(
+      create: (context) =>
+          ReviewResultsCubit(context.read())..loadResults(submissionId),
+      child: _ReviewResultsView(onBack: onBack),
+    );
+  }
 }
 
-class _ReviewResultsScreenState extends State<ReviewResultsScreen> {
-  Submission? _submission;
-  bool _loading = true;
-  String? _error;
+class _ReviewResultsView extends StatelessWidget {
+  final VoidCallback onBack;
 
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final s = await widget.apiClient.getSubmissionResults(
-        widget.submissionId,
-      );
-      setState(() => _submission = s);
-    } catch (e) {
-      setState(() => _error = e.toString());
-    } finally {
-      setState(() => _loading = false);
-    }
-  }
+  const _ReviewResultsView({required this.onBack});
 
   @override
   Widget build(BuildContext context) {
     return WillPopScope(
       onWillPop: () async {
-        widget.onBack();
+        onBack();
         return false;
       },
       child: Scaffold(
@@ -58,24 +41,41 @@ class _ReviewResultsScreenState extends State<ReviewResultsScreen> {
           title: const Text('Результаты проверки'),
           leading: IconButton(
             icon: const Icon(Icons.arrow_back),
-            onPressed: widget.onBack,
+            onPressed: onBack,
           ),
         ),
-        body: _buildBody(),
+        body: BlocBuilder<ReviewResultsCubit, ReviewResultsState>(
+          builder: (context, state) {
+            if (state is ReviewResultsInitial ||
+                state is ReviewResultsLoading) {
+              return const Center(child: CircularProgressIndicator());
+            }
+
+            if (state is ReviewResultsError) {
+              return Center(child: Text('Ошибка: ${state.message}'));
+            }
+
+            if (state is ReviewResultsLoaded) {
+              return _buildContent(context, state.submission);
+            }
+
+            return const SizedBox.shrink();
+          },
+        ),
       ),
     );
   }
 
-  Widget _buildBody() {
-    if (_loading) return const Center(child: CircularProgressIndicator());
-    if (_error != null) return Center(child: Text('Ошибка: $_error'));
-
-    final s = _submission!;
+  Widget _buildContent(BuildContext context, Submission s) {
+    final scheme = Theme.of(context).colorScheme;
+    const summaryFg = Colors.white;
     final totalScore = s.reviews.fold<int>(0, (sum, r) => sum + r.score);
     final totalMax = s.reviews.fold<int>(0, (sum, r) => sum + r.maxScore);
 
     return RefreshIndicator(
-      onRefresh: _load,
+      onRefresh: () async {
+        await context.read<ReviewResultsCubit>().loadResults(s.id);
+      },
       child: SingleChildScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(16),
@@ -84,47 +84,104 @@ class _ReviewResultsScreenState extends State<ReviewResultsScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              
-              Card(
-                color: Theme.of(context).colorScheme.primaryContainer,
-                child: Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Row(
+              ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: scheme.surface,
+                    border: Border.all(color: Colors.white12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Expanded(
-                        child: Column(
+                      ColoredBox(
+                        color: scheme.primary,
+                        child: const SizedBox(
+                          height: 4,
+                          width: double.infinity,
+                        ),
+                      ),
+                      Container(
+                        color: const Color(0xFF2A2A2A),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 14,
+                        ),
+                        child: Text(
+                          'Информация о проверке',
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(
+                                color: summaryFg,
+                                fontWeight: FontWeight.w600,
+                              ),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              s.studentName.isNotEmpty
-                                  ? s.studentName
-                                  : 'Студент #${s.studentId}',
-                              style: Theme.of(context).textTheme.titleLarge,
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    s.studentName.isNotEmpty
+                                        ? s.studentName
+                                        : 'Студент #${s.studentId}',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleLarge
+                                        ?.copyWith(color: summaryFg),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    s.githubRepo.isNotEmpty
+                                        ? s.githubRepo
+                                        : 'Репозиторий не указан',
+                                    style: Theme.of(context).textTheme.bodySmall
+                                        ?.copyWith(
+                                          color: summaryFg.withOpacity(0.85),
+                                        ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    'Статус: ${_statusText(s.status)}',
+                                    style: Theme.of(context).textTheme.bodySmall
+                                        ?.copyWith(
+                                          color: summaryFg.withOpacity(0.85),
+                                        ),
+                                  ),
+                                ],
+                              ),
                             ),
-                            const SizedBox(height: 4),
-                            Text(
-                              s.githubRepo,
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'Статус: ${_statusText(s.status)}',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
+                            if (s.reviews.isNotEmpty)
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  Text(
+                                    '$totalScore/$totalMax',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .headlineMedium
+                                        ?.copyWith(
+                                          fontWeight: FontWeight.bold,
+                                          color: summaryFg,
+                                        ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    'Итого',
+                                    style: Theme.of(context).textTheme.bodySmall
+                                        ?.copyWith(
+                                          color: summaryFg.withOpacity(0.85),
+                                        ),
+                                  ),
+                                ],
+                              ),
                           ],
                         ),
                       ),
-                      if (s.reviews.isNotEmpty)
-                        Column(
-                          children: [
-                            Text(
-                              '$totalScore/$totalMax',
-                              style: Theme.of(context).textTheme.headlineMedium
-                                  ?.copyWith(fontWeight: FontWeight.bold),
-                            ),
-                            const Text('Итого'),
-                          ],
-                        ),
                     ],
                   ),
                 ),
@@ -155,13 +212,41 @@ class _ReviewResultsScreenState extends State<ReviewResultsScreen> {
                 ),
                 const SizedBox(height: 8),
                 ...s.findings.map(
-                  (f) => Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(14),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
+                  (f) => Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.surface,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: Colors.white12),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color.fromRGBO(0, 0, 0, 0.08),
+                          blurRadius: 12,
+                          offset: Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Container(
+                          decoration: BoxDecoration(
+                            color: Color.fromRGBO(
+                              _severityColor(f.severity).red,
+                              _severityColor(f.severity).green,
+                              _severityColor(f.severity).blue,
+                              0.2,
+                            ),
+                            borderRadius: const BorderRadius.only(
+                              topLeft: Radius.circular(14),
+                              topRight: Radius.circular(14),
+                            ),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 12,
+                          ),
+                          child: Row(
                             children: [
                               Expanded(
                                 child: Text(
@@ -191,25 +276,127 @@ class _ReviewResultsScreenState extends State<ReviewResultsScreen> {
                               ),
                             ],
                           ),
-                          const SizedBox(height: 6),
-                          Text('${f.filePath}:${f.startLine}-${f.endLine}'),
-                          const SizedBox(height: 8),
-                          Text(f.comment),
-                          if (f.suggestion.isNotEmpty) ...[
-                            const SizedBox(height: 8),
-                            Text('Рекомендация: ${f.suggestion}'),
-                          ],
-                        ],
-                      ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(f.comment),
+                              if (f.suggestion.isNotEmpty) ...[
+                                const SizedBox(height: 8),
+                                Text(
+                                  'Рекомендация: ${f.suggestion}',
+                                  style: const TextStyle(
+                                    color: Colors.blueAccent,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
               ],
 
-              
-              ...s.reviews.asMap().entries.map(
-                (e) => _buildCriteriaCard(e.key + 1, e.value),
-              ),
+              if (s.reviews.isNotEmpty) ...[
+                const SizedBox(height: 24),
+                Text(
+                  'Детализация оценок по критериям',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 8),
+                ...s.reviews.map(
+                  (r) => Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.surface,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: Colors.white12),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Container(
+                          decoration: BoxDecoration(
+                            color: Color.fromRGBO(
+                              _scoreColor(r.score, r.maxScore).red,
+                              _scoreColor(r.score, r.maxScore).green,
+                              _scoreColor(r.score, r.maxScore).blue,
+                              0.18,
+                            ),
+                            borderRadius: const BorderRadius.only(
+                              topLeft: Radius.circular(14),
+                              topRight: Radius.circular(14),
+                            ),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 12,
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  r.criteriaDesc,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                '${r.score} / ${r.maxScore}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (r.comment.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.chat_bubble_outline_rounded,
+                                      size: 13,
+                                      color: Colors.white38,
+                                    ),
+                                    const SizedBox(width: 5),
+                                    Text(
+                                      'Комментарий проверки',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.white38,
+                                        letterSpacing: 0.4,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  r.comment,
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    height: 1.5,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -217,182 +404,11 @@ class _ReviewResultsScreenState extends State<ReviewResultsScreen> {
     );
   }
 
-  Widget _buildCriteriaCard(int index, Review r) {
-    final color = _scoreColor(r.score, r.maxScore);
-    final ratio = r.maxScore > 0 ? r.score / r.maxScore : 0.0;
-    final percent = (ratio * 100).round();
-
-    
-    final descLines = r.criteriaDesc.trim().split('\n');
-    final title = descLines.first.trim();
-    final details = descLines.length > 1
-        ? descLines.skip(1).join('\n').trim()
-        : '';
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        border: Border.all(color: Colors.white12),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            decoration: BoxDecoration(
-              color: color.withOpacity(0.12),
-              border: Border(
-                left: BorderSide(color: color, width: 4),
-              ),
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                
-                Container(
-                  width: 24,
-                  height: 24,
-                  margin: const EdgeInsets.only(top: 1, right: 10),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: color.withOpacity(0.25),
-                    border: Border.all(color: color.withOpacity(0.6)),
-                  ),
-                  child: Center(
-                    child: Text(
-                      '$index',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                        color: color,
-                      ),
-                    ),
-                  ),
-                ),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title.isNotEmpty ? title : 'Критерий $index',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 15,
-                        ),
-                      ),
-                      if (details.isNotEmpty) ...
-                        [
-                          const SizedBox(height: 4),
-                          Text(
-                            details,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.white.withOpacity(0.55),
-                              height: 1.4,
-                            ),
-                          ),
-                        ],
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 12),
-                
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: color,
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Text(
-                        '${r.score} / ${r.maxScore}',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      '$percent%',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: color,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          
-          LinearProgressIndicator(
-            value: ratio.toDouble(),
-            minHeight: 3,
-            backgroundColor: Colors.white10,
-            valueColor: AlwaysStoppedAnimation<Color>(color),
-          ),
-          
-          if (r.comment.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(
-                        Icons.chat_bubble_outline_rounded,
-                        size: 13,
-                        color: Colors.white38,
-                      ),
-                      const SizedBox(width: 5),
-                      Text(
-                        'Комментарий проверки',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.white38,
-                          letterSpacing: 0.4,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    r.comment,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      height: 1.5,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Color _severityColor(String severity) {
-    switch (severity.toLowerCase()) {
-      case 'error':
-        return Colors.red;
-      case 'warning':
-        return Colors.orange;
-      default:
-        return Colors.blueGrey;
-    }
+  String _statusText(String s) {
+    if (s == 'completed') return 'Завершено';
+    if (s == 'reviewing') return 'Проверяется';
+    if (s == 'failed' || s == 'error') return 'Ошибка проверки';
+    return s;
   }
 
   Color _scoreColor(int score, int maxScore) {
@@ -403,18 +419,16 @@ class _ReviewResultsScreenState extends State<ReviewResultsScreen> {
     return Colors.red;
   }
 
-  String _statusText(String status) {
-    switch (status) {
-      case 'pending':
-        return 'Ожидает проверки';
-      case 'reviewing':
-        return 'Проверяется...';
-      case 'completed':
-        return 'Проверено';
+  Color _severityColor(String sev) {
+    switch (sev.toLowerCase()) {
       case 'error':
-        return 'Ошибка проверки';
+        return Colors.red;
+      case 'warning':
+        return Colors.orange;
+      case 'info':
+        return Colors.blue;
       default:
-        return status;
+        return Colors.grey;
     }
   }
 }

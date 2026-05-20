@@ -39,7 +39,7 @@ func (r *SnapshotRepo) GetBySubmission(submissionID int64) (*models.RepoSnapshot
 }
 
 func (r *SnapshotRepo) DeleteSnapshotData(snapshotID int64) error {
-	
+
 	_, err := r.db.Exec(`DELETE FROM source_files WHERE snapshot_id = $1`, snapshotID)
 	return err
 }

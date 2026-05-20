@@ -20,21 +20,21 @@ func (r *SubmissionRepo) Create(assignmentID, studentID int64, githubRepo string
 		`INSERT INTO submissions (assignment_id, student_id, github_repo, status)
 		 VALUES ($1, $2, $3, 'pending')
 		 ON CONFLICT (assignment_id, student_id) DO UPDATE SET github_repo = $3, status = 'pending'
-		 RETURNING id, assignment_id, student_id, github_repo, status, created_at`,
+		 RETURNING id, assignment_id, student_id, github_repo, llm_provider, status, created_at`,
 		assignmentID, studentID, githubRepo,
-	).Scan(&s.ID, &s.AssignmentID, &s.StudentID, &s.GithubRepo, &s.Status, &s.CreatedAt)
+	).Scan(&s.ID, &s.AssignmentID, &s.StudentID, &s.GithubRepo, &s.LLMProvider, &s.Status, &s.CreatedAt)
 	return s, err
 }
 
 func (r *SubmissionRepo) GetByID(id int64) (*models.Submission, error) {
 	s := &models.Submission{}
 	err := r.db.QueryRow(
-		`SELECT s.id, s.assignment_id, s.student_id, u.name, s.github_repo, s.status, s.created_at
+		`SELECT s.id, s.assignment_id, s.student_id, u.name, s.github_repo, s.llm_provider, s.status, s.created_at
 		 FROM submissions s
 		 JOIN users u ON u.id = s.student_id
 		 WHERE s.id = $1`,
 		id,
-	).Scan(&s.ID, &s.AssignmentID, &s.StudentID, &s.StudentName, &s.GithubRepo, &s.Status, &s.CreatedAt)
+	).Scan(&s.ID, &s.AssignmentID, &s.StudentID, &s.StudentName, &s.GithubRepo, &s.LLMProvider, &s.Status, &s.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +43,7 @@ func (r *SubmissionRepo) GetByID(id int64) (*models.Submission, error) {
 
 func (r *SubmissionRepo) ListByAssignment(assignmentID int64) ([]models.Submission, error) {
 	rows, err := r.db.Query(
-		`SELECT s.id, s.assignment_id, s.student_id, u.name, s.github_repo, s.status, s.created_at
+		`SELECT s.id, s.assignment_id, s.student_id, u.name, s.github_repo, s.llm_provider, s.status, s.created_at
 		 FROM submissions s
 		 JOIN users u ON u.id = s.student_id
 		 WHERE s.assignment_id = $1
@@ -58,7 +58,7 @@ func (r *SubmissionRepo) ListByAssignment(assignmentID int64) ([]models.Submissi
 	var submissions []models.Submission
 	for rows.Next() {
 		var s models.Submission
-		if err := rows.Scan(&s.ID, &s.AssignmentID, &s.StudentID, &s.StudentName, &s.GithubRepo, &s.Status, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.AssignmentID, &s.StudentID, &s.StudentName, &s.GithubRepo, &s.LLMProvider, &s.Status, &s.CreatedAt); err != nil {
 			return nil, err
 		}
 		submissions = append(submissions, s)
@@ -68,7 +68,7 @@ func (r *SubmissionRepo) ListByAssignment(assignmentID int64) ([]models.Submissi
 
 func (r *SubmissionRepo) ListByStudent(studentID int64) ([]models.Submission, error) {
 	rows, err := r.db.Query(
-		`SELECT s.id, s.assignment_id, s.student_id, u.name, s.github_repo, s.status, s.created_at
+		`SELECT s.id, s.assignment_id, s.student_id, u.name, s.github_repo, s.llm_provider, s.status, s.created_at
 		 FROM submissions s
 		 JOIN users u ON u.id = s.student_id
 		 WHERE s.student_id = $1
@@ -83,7 +83,7 @@ func (r *SubmissionRepo) ListByStudent(studentID int64) ([]models.Submission, er
 	var submissions []models.Submission
 	for rows.Next() {
 		var s models.Submission
-		if err := rows.Scan(&s.ID, &s.AssignmentID, &s.StudentID, &s.StudentName, &s.GithubRepo, &s.Status, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.AssignmentID, &s.StudentID, &s.StudentName, &s.GithubRepo, &s.LLMProvider, &s.Status, &s.CreatedAt); err != nil {
 			return nil, err
 		}
 		submissions = append(submissions, s)
@@ -96,6 +96,11 @@ func (r *SubmissionRepo) UpdateStatus(id int64, status string) error {
 	return err
 }
 
+func (r *SubmissionRepo) UpdateLLMProvider(id int64, provider string) error {
+	_, err := r.db.Exec(`UPDATE submissions SET llm_provider = $1 WHERE id = $2`, provider, id)
+	return err
+}
+
 func (r *SubmissionRepo) ClearReviewData(submissionID int64) error {
 	tx, err := r.db.Begin()
 	if err != nil {
@@ -103,7 +108,7 @@ func (r *SubmissionRepo) ClearReviewData(submissionID int64) error {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`DELETE FROM review_findings WHERE submission_id = $1`, submissionID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM review_findings WHERE review_id IN (SELECT id FROM reviews WHERE submission_id = $1)`, submissionID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM reviews WHERE submission_id = $1`, submissionID); err != nil {
@@ -155,17 +160,17 @@ func (r *SubmissionRepo) ReplaceFindings(submissionID int64, findings []models.R
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`DELETE FROM review_findings WHERE submission_id = $1`, submissionID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM review_findings WHERE review_id IN (SELECT id FROM reviews WHERE submission_id = $1)`, submissionID); err != nil {
 		return err
 	}
 
 	for i := range findings {
 		f := &findings[i]
 		if err := tx.QueryRow(
-			`INSERT INTO review_findings (submission_id, criteria_id, file_path, start_line, end_line, severity, title, comment, suggestion, source)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			`INSERT INTO review_findings (review_id, source_file_id, start_line, end_line, severity, title, comment, suggestion, source)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			 RETURNING id, created_at`,
-			f.SubmissionID, f.CriteriaID, f.FilePath, f.StartLine, f.EndLine, f.Severity, f.Title, f.Comment, f.Suggestion, f.Source,
+			f.ReviewID, f.SourceFileID, f.StartLine, f.EndLine, f.Severity, f.Title, f.Comment, f.Suggestion, f.Source,
 		).Scan(&f.ID, &f.CreatedAt); err != nil {
 			return err
 		}
@@ -176,10 +181,12 @@ func (r *SubmissionRepo) ReplaceFindings(submissionID int64, findings []models.R
 
 func (r *SubmissionRepo) GetFindings(submissionID int64) ([]models.ReviewFinding, error) {
 	rows, err := r.db.Query(
-		`SELECT id, submission_id, criteria_id, file_path, start_line, end_line, severity, title, comment, suggestion, source, created_at
-		 FROM review_findings
-		 WHERE submission_id = $1
-		 ORDER BY id`,
+		`SELECT rf.id, rf.review_id, rf.source_file_id, COALESCE(sf.file_path, ''), rf.start_line, rf.end_line, rf.severity, rf.title, rf.comment, rf.suggestion, rf.source, rf.created_at
+		 FROM review_findings rf
+		 JOIN reviews rev ON rev.id = rf.review_id
+		 LEFT JOIN source_files sf ON sf.id = rf.source_file_id
+		 WHERE rev.submission_id = $1
+		 ORDER BY rf.id`,
 		submissionID,
 	)
 	if err != nil {
@@ -192,9 +199,9 @@ func (r *SubmissionRepo) GetFindings(submissionID int64) ([]models.ReviewFinding
 		var f models.ReviewFinding
 		if err := rows.Scan(
 			&f.ID,
-			&f.SubmissionID,
-			&f.CriteriaID,
-			&f.FilePath,
+			&f.ReviewID,
+			&f.SourceFileID,
+			&f.SourceFilePath,
 			&f.StartLine,
 			&f.EndLine,
 			&f.Severity,

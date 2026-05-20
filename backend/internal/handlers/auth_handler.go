@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strconv"
-	"net/url"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,6 +16,7 @@ import (
 	"appraiser/internal/models"
 	"appraiser/internal/repository"
 
+	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -26,7 +27,8 @@ type AuthHandler struct {
 }
 
 type deviceFlowMeta struct {
-	IsTeacher bool
+	Role      string
+	Email     string
 	ExpiresAt time.Time
 }
 
@@ -73,7 +75,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := middleware.GenerateToken(user.ID, user.IsTeacher)
+	token, err := middleware.GenerateToken(user.ID, user.Role)
 	if err != nil {
 		writeError(w, "failed to generate token", http.StatusInternalServerError)
 		return
@@ -94,16 +96,16 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.userRepo.GetByEmail(req.Email)
 	if err != nil {
-		writeError(w, "invalid email or password", http.StatusUnauthorized)
+		writeError(w, fmt.Sprintf("invalid email - %s", req.Email), http.StatusUnauthorized)
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
-		writeError(w, "invalid email or password", http.StatusUnauthorized)
+		writeError(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
 
-	token, err := middleware.GenerateToken(user.ID, user.IsTeacher)
+	token, err := middleware.GenerateToken(user.ID, user.Role)
 	if err != nil {
 		writeError(w, "failed to generate token", http.StatusInternalServerError)
 		return
@@ -140,6 +142,7 @@ func (h *AuthHandler) GitHubDeviceStart(w http.ResponseWriter, r *http.Request) 
 	startReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	startReq.Header.Set("Accept", "application/json")
 
+	// наверное, много поставил, но всё равно это редкая ситуация
 	resp, err := (&http.Client{Timeout: 12 * time.Second}).Do(startReq)
 	if err != nil {
 		writeError(w, "failed to start github oauth", http.StatusBadGateway)
@@ -161,7 +164,8 @@ func (h *AuthHandler) GitHubDeviceStart(w http.ResponseWriter, r *http.Request) 
 
 	h.mu.Lock()
 	h.device[startResp.DeviceCode] = deviceFlowMeta{
-		IsTeacher: req.IsTeacher,
+		Role:      req.Role,
+		Email:     req.Email,
 		ExpiresAt: time.Now().Add(time.Duration(startResp.ExpiresIn) * time.Second),
 	}
 	h.mu.Unlock()
@@ -255,17 +259,26 @@ func (h *AuthHandler) GitHubDevicePoll(w http.ResponseWriter, r *http.Request) {
 		name = ghUser.Login
 	}
 
-	user, err := h.userRepo.UpsertGitHubUser(email, name, ghUser.ID, ghUser.Login, meta.IsTeacher)
-	if err != nil {
-		writeError(w, "failed to login via github: "+err.Error(), http.StatusInternalServerError)
-		return
+	var user *models.User
+	if meta.Email != "" {
+		user, err = h.userRepo.LinkGitHubToEmail(meta.Email, name, ghUser.ID, ghUser.Login)
+		if err != nil {
+			writeError(w, "failed to link github account: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else {
+		user, err = h.userRepo.UpsertGitHubUser(email, name, ghUser.ID, ghUser.Login, meta.Role)
+		if err != nil {
+			writeError(w, "failed to login via github: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	h.mu.Lock()
 	delete(h.device, req.DeviceCode)
 	h.mu.Unlock()
 
-	jwtToken, err := middleware.GenerateToken(user.ID, user.IsTeacher)
+	jwtToken, err := middleware.GenerateToken(user.ID, user.Role)
 	if err != nil {
 		writeError(w, "failed to generate token", http.StatusInternalServerError)
 		return

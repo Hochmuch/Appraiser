@@ -1,11 +1,12 @@
-import 'dart:async';
-
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import '../models/models.dart';
-import '../services/api_client.dart';
+import '../repositories/assignment_repository.dart';
+import '../repositories/auth_repository.dart';
+import '../repositories/submission_repository.dart';
+import '../cubits/assignment_detail_cubit.dart';
 
-class AssignmentDetailScreen extends StatefulWidget {
-  final ApiClient apiClient;
+class AssignmentDetailScreen extends StatelessWidget {
   final int assignmentId;
   final void Function(int submissionId) onViewResults;
   final void Function(int submissionId) onViewFiles;
@@ -14,7 +15,6 @@ class AssignmentDetailScreen extends StatefulWidget {
 
   const AssignmentDetailScreen({
     super.key,
-    required this.apiClient,
     required this.assignmentId,
     required this.onViewResults,
     required this.onViewFiles,
@@ -23,131 +23,60 @@ class AssignmentDetailScreen extends StatefulWidget {
   });
 
   @override
-  State<AssignmentDetailScreen> createState() => _AssignmentDetailScreenState();
+  Widget build(BuildContext context) {
+    return BlocProvider(
+      create: (context) => AssignmentDetailCubit(
+        assignmentRepository: context.read<AssignmentRepository>(),
+        submissionRepository: context.read<SubmissionRepository>(),
+        assignmentId: assignmentId,
+      ),
+      child: _AssignmentDetailView(
+        onViewResults: onViewResults,
+        onViewFiles: onViewFiles,
+        onBack: onBack,
+        onEdit: onEdit,
+      ),
+    );
+  }
 }
 
-class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
-  Assignment? _assignment;
-  bool _loading = true;
-  String? _error;
-  final _repoController = TextEditingController();
-  Timer? _reviewPollingTimer;
-  bool _pollRequestInFlight = false;
-  bool _submitting = false;
+class LLMOption {
+  final String label;
+  final String provider;
+  final String model;
+  const LLMOption(this.label, this.provider, this.model);
+}
+
+class _AssignmentDetailView extends StatefulWidget {
+  final void Function(int submissionId) onViewResults;
+  final void Function(int submissionId) onViewFiles;
+  final void Function(Assignment assignment)? onEdit;
+  final VoidCallback onBack;
+
+  const _AssignmentDetailView({
+    required this.onViewResults,
+    required this.onViewFiles,
+    required this.onBack,
+    this.onEdit,
+  });
 
   @override
-  void initState() {
-    super.initState();
-    _load();
-  }
+  State<_AssignmentDetailView> createState() => _AssignmentDetailViewState();
+}
+
+class _AssignmentDetailViewState extends State<_AssignmentDetailView> {
+  static const List<LLMOption> _llmOptions = [
+    LLMOption('Gemini 3.1 Flash Lite', 'gemini', 'gemini-3.1-flash-lite'),
+    LLMOption('GigaChat 2', 'gigachat', 'GigaChat-2'),
+  ];
+
+  final _repoController = TextEditingController();
+  LLMOption _selectedReviewOption = _llmOptions.first;
 
   @override
   void dispose() {
-    _reviewPollingTimer?.cancel();
     _repoController.dispose();
     super.dispose();
-  }
-
-  Future<void> _load({bool showLoading = true}) async {
-    if (showLoading) {
-      setState(() {
-        _loading = true;
-        _error = null;
-      });
-    }
-
-    try {
-      final a = await widget.apiClient.getAssignment(widget.assignmentId);
-      if (!mounted) return;
-
-      final hadReviewingSubmission =
-          _assignment?.submissions?.any((s) => s.status == 'reviewing') ??
-          false;
-      final hasReviewingSubmission =
-          a.submissions?.any((s) => s.status == 'reviewing') ?? false;
-
-      setState(() {
-        _assignment = a;
-        _error = null;
-      });
-
-      _syncReviewPolling(hasReviewingSubmission);
-
-      if (hadReviewingSubmission && !hasReviewingSubmission) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Проверка завершена. Результаты обновлены.'),
-          ),
-        );
-      }
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _error = e.toString());
-    } finally {
-      if (!mounted) return;
-      if (showLoading) {
-        setState(() => _loading = false);
-      }
-    }
-  }
-
-  void _syncReviewPolling(bool shouldPoll) {
-    if (!shouldPoll) {
-      _reviewPollingTimer?.cancel();
-      _reviewPollingTimer = null;
-      return;
-    }
-
-    if (_reviewPollingTimer != null) return;
-
-    _reviewPollingTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
-      if (!mounted || _pollRequestInFlight) return;
-      _pollRequestInFlight = true;
-      try {
-        await _load(showLoading: false);
-      } finally {
-        _pollRequestInFlight = false;
-      }
-    });
-  }
-
-  Future<void> _submit() async {
-    if (_repoController.text.trim().isEmpty) return;
-
-    setState(() => _submitting = true);
-    try {
-      await widget.apiClient.submitAssignment(
-        widget.assignmentId,
-        _repoController.text.trim(),
-      );
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Работа отправлена!')));
-      _repoController.clear();
-      _load();
-    } catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
-    } finally {
-      setState(() => _submitting = false);
-    }
-  }
-
-  Future<void> _startReview(int submissionId) async {
-    try {
-      await widget.apiClient.startReview(submissionId);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Проверка запущена!')));
-      _syncReviewPolling(true);
-      await Future.delayed(const Duration(seconds: 1));
-      await _load(showLoading: false);
-    } catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
-    }
   }
 
   @override
@@ -157,40 +86,91 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
         widget.onBack();
         return false;
       },
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text(_assignment?.title ?? 'Задание'),
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back),
-            onPressed: widget.onBack,
-          ),
-          actions: [
-            if (widget.apiClient.isTeacher &&
-                _assignment != null &&
-                widget.onEdit != null)
-              IconButton(
-                icon: const Icon(Icons.edit),
-                tooltip: 'Редактировать',
-                onPressed: () => widget.onEdit!(_assignment!),
+      child: BlocConsumer<AssignmentDetailCubit, AssignmentDetailState>(
+        listener: (context, state) {
+          if (state.submitInfoMsg != null) {
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text(state.submitInfoMsg!)));
+            _repoController.clear();
+          }
+          if (state.submitError != null) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  state.submitError!,
+                  style: const TextStyle(color: Colors.red),
+                ),
               ),
-          ],
-        ),
-        body: _buildBody(),
+            );
+          }
+          if (state.reviewActionMsg != null) {
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text(state.reviewActionMsg!)));
+          }
+          if (state.reviewError != null) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  state.reviewError!,
+                  style: const TextStyle(color: Colors.red),
+                ),
+              ),
+            );
+          }
+
+          if (state.submitInfoMsg != null ||
+              state.submitError != null ||
+              state.reviewActionMsg != null ||
+              state.reviewError != null) {
+            context.read<AssignmentDetailCubit>().clearMessages();
+          }
+        },
+        builder: (context, state) {
+          return Scaffold(
+            appBar: AppBar(
+              title: Text(state.assignment?.title ?? 'Задание'),
+              leading: IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: widget.onBack,
+              ),
+              actions: [
+                if (context.read<AuthRepository>().isTeacher &&
+                    state.assignment != null &&
+                    widget.onEdit != null)
+                  IconButton(
+                    icon: const Icon(Icons.edit),
+                    tooltip: 'Редактировать',
+                    onPressed: () => widget.onEdit!(state.assignment!),
+                  ),
+              ],
+            ),
+            body: _buildBody(context, state),
+          );
+        },
       ),
     );
   }
 
-  Widget _buildBody() {
-    if (_loading) return const Center(child: CircularProgressIndicator());
-    if (_error != null) {
-      return Center(child: Text('Ошибка: $_error'));
+  Widget _buildBody(BuildContext context, AssignmentDetailState state) {
+    if (state.isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (state.error != null) {
+      return Center(child: Text('Ошибка: ${state.error}'));
+    }
+    if (state.assignment == null) {
+      return const Center(child: Text('Задание не найдено'));
     }
 
-    final a = _assignment!;
-    final isTeacher = widget.apiClient.isTeacher;
+    final a = state.assignment!;
+    final isTeacher = context.read<AuthRepository>().isTeacher;
 
     return RefreshIndicator(
-      onRefresh: _load,
+      onRefresh: () => context.read<AssignmentDetailCubit>().loadAssignment(
+        showLoading: false,
+      ),
       child: SingleChildScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(16),
@@ -199,7 +179,6 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              
               Text(a.title, style: Theme.of(context).textTheme.headlineSmall),
               const SizedBox(height: 4),
               Text(
@@ -227,7 +206,6 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
                 const SizedBox(height: 20),
               ],
 
-              
               Text(
                 'Критерии оценки',
                 style: Theme.of(context).textTheme.titleMedium,
@@ -237,7 +215,6 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
                 (e) => _buildAssignmentCriteriaCard(e.key + 1, e.value),
               ),
 
-              
               if (!isTeacher) ...[
                 const SizedBox(height: 24),
                 const Divider(),
@@ -252,15 +229,23 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
                     final repoField = TextField(
                       controller: _repoController,
                       decoration: const InputDecoration(
-                        labelText: 'Ссылка на GitHub репозиторий',
-                        hintText: 'https://github.com/user/repo',
+                        labelText: 'Ссылка на ваш GitHub репозиторий',
+                        hintText: 'https://github.com/ваше-имя/repo',
                         border: OutlineInputBorder(),
                       ),
                     );
 
                     final submitButton = FilledButton(
-                      onPressed: _submitting ? null : _submit,
-                      child: _submitting
+                      onPressed: state.isSubmitting
+                          ? null
+                          : () {
+                              context
+                                  .read<AssignmentDetailCubit>()
+                                  .submitRepository(
+                                    _repoController.text.trim(),
+                                  );
+                            },
+                      child: state.isSubmitting
                           ? const SizedBox(
                               height: 20,
                               width: 20,
@@ -281,8 +266,9 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
                     }
 
                     return Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Expanded(child: repoField),
+                        Expanded(child: Column(children: [repoField])),
                         const SizedBox(width: 12),
                         submitButton,
                       ],
@@ -291,7 +277,6 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
                 ),
               ],
 
-              
               if (isTeacher && a.submissions != null) ...[
                 const SizedBox(height: 24),
                 const Divider(),
@@ -300,9 +285,35 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
                 const SizedBox(height: 8),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 320),
+                  child: DropdownButtonFormField<LLMOption>(
+                    initialValue: _selectedReviewOption,
+                    decoration: const InputDecoration(
+                      labelText: 'Версия модели LLM: ',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: _llmOptions
+                        .map(
+                          (option) => DropdownMenuItem<LLMOption>(
+                            value: option,
+                            child: Text(option.label),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setState(() => _selectedReviewOption = value);
+                    },
+                  ),
+                ),
+                const SizedBox(height: 12),
                 if (a.submissions!.isEmpty)
                   const Text('Пока никто не отправил работу'),
-                ...a.submissions!.map((s) => _buildSubmissionCard(s)),
+                ...a.submissions!.map(
+                  (s) =>
+                      _buildSubmissionCard(context, s, state.isStartingReview),
+                ),
               ],
             ],
           ),
@@ -329,7 +340,7 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             decoration: BoxDecoration(
-              color: Colors.indigo.withOpacity(0.12),
+              color: const Color.fromRGBO(63, 81, 181, 0.12),
               border: const Border(
                 left: BorderSide(color: Colors.indigo, width: 4),
               ),
@@ -343,8 +354,10 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
                   margin: const EdgeInsets.only(top: 1, right: 10),
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: Colors.indigo.withOpacity(0.22),
-                    border: Border.all(color: Colors.indigo.withOpacity(0.7)),
+                    color: const Color.fromRGBO(63, 81, 181, 0.22),
+                    border: Border.all(
+                      color: const Color.fromRGBO(63, 81, 181, 0.7),
+                    ),
                   ),
                   child: Center(
                     child: Text(
@@ -365,7 +378,7 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
                         'Критерий',
                         style: TextStyle(
                           fontSize: 11,
-                          color: Colors.white.withOpacity(0.55),
+                          color: const Color.fromRGBO(255, 255, 255, 0.55),
                           fontWeight: FontWeight.w600,
                           letterSpacing: 0.3,
                         ),
@@ -412,20 +425,16 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
                   Text(
                     'Требования',
                     style: TextStyle(
-                      fontSize: 11,
+                      fontSize: 12,
                       fontWeight: FontWeight.w600,
-                      color: Colors.white.withOpacity(0.4),
-                      letterSpacing: 0.3,
+                      color: const Color.fromRGBO(63, 81, 181, 0.8),
+                      letterSpacing: 0.5,
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 6),
                   Text(
                     details,
-                    style: TextStyle(
-                      fontSize: 13,
-                      height: 1.45,
-                      color: Colors.white.withOpacity(0.86),
-                    ),
+                    style: const TextStyle(fontSize: 14, height: 1.5),
                   ),
                 ],
               ),
@@ -435,78 +444,74 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
     );
   }
 
-  Widget _buildSubmissionCard(Submission s) {
-    final statusColor = _statusColor(s.status);
+  Widget _buildSubmissionCard(
+    BuildContext context,
+    Submission sub,
+    bool isStartingReview,
+  ) {
+    final statusMap = {
+      'pending': {'label': 'Не проверено', 'color': Colors.orange},
+      'reviewing': {'label': 'Проверяется...', 'color': Colors.blue},
+      'completed': {'label': 'Проверено', 'color': Colors.green},
+      'failed': {'label': 'Ошибка проверки', 'color': Colors.red},
+    };
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        border: Border.all(color: Colors.white12),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            decoration: BoxDecoration(
-              color: statusColor.withOpacity(0.14),
-              border: Border(left: BorderSide(color: statusColor, width: 4)),
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
+    final st =
+        statusMap[sub.status] ?? {'label': sub.status, 'color': Colors.grey};
+    final label = st['label'] as String;
+    final color = st['color'] as Color;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        s.studentName.isNotEmpty
-                            ? s.studentName
-                            : 'Студент #${s.studentId}',
-                        style: const TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 5),
-                      Text(
-                        s.githubRepo,
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.white.withOpacity(0.72),
-                          height: 1.35,
-                        ),
-                      ),
-                    ],
+                  child: Text(
+                    sub.studentName.isNotEmpty
+                        ? sub.studentName
+                        : 'Студент #${sub.studentId}',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
                 ),
-                const SizedBox(width: 10),
                 Container(
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
+                    horizontal: 8,
                     vertical: 4,
                   ),
                   decoration: BoxDecoration(
-                    color: statusColor,
-                    borderRadius: BorderRadius.circular(16),
+                    color: Color.fromRGBO(
+                      (color.r * 255).round(),
+                      (color.g * 255).round(),
+                      (color.b * 255).round(),
+                      0.2,
+                    ),
+                    borderRadius: BorderRadius.circular(12),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(
-                        _statusIcon(s.status),
-                        size: 13,
-                        color: Colors.white,
-                      ),
-                      const SizedBox(width: 4),
+                      if (sub.status == 'reviewing') ...[
+                        SizedBox(
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: color,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                      ],
                       Text(
-                        _statusText(s.status),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 11,
+                        label,
+                        style: TextStyle(
+                          color: color,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
                         ),
                       ),
                     ],
@@ -514,100 +519,56 @@ class _AssignmentDetailScreenState extends State<AssignmentDetailScreen> {
                 ),
               ],
             ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-            child: Wrap(
+            const SizedBox(height: 8),
+            Text(
+              sub.githubRepo,
+              style: const TextStyle(fontSize: 13, color: Colors.blue),
+            ),
+            if (sub.llmProvider.isNotEmpty) ...[
+              const SizedBox(height: 2),
+              Text(
+                'Проверено с помощью: ${sub.llmProvider}',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ],
+            const SizedBox(height: 12),
+            Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
-                if (s.status == 'pending' ||
-                    s.status == 'error' ||
-                    s.status == 'completed')
+                if (sub.status != 'reviewing')
                   FilledButton.icon(
-                    onPressed: () => _startReview(s.id),
-                    icon: Icon(
-                      s.status == 'completed'
-                          ? Icons.refresh
-                          : Icons.play_arrow,
-                      size: 16,
-                    ),
+                    onPressed: isStartingReview
+                        ? null
+                        : () =>
+                              context.read<AssignmentDetailCubit>().startReview(
+                                sub.id,
+                                _selectedReviewOption.provider,
+                                _selectedReviewOption.model,
+                              ),
+                    icon: const Icon(Icons.psychology, size: 18),
                     label: Text(
-                      s.status == 'completed'
-                          ? 'Проверить заново'
-                          : 'Запустить проверку',
+                      sub.status == 'completed'
+                          ? 'Перепроверить (LLM)'
+                          : 'Автопроверка (LLM)',
                     ),
                   ),
-                if (s.status == 'completed')
+                if (sub.status == 'completed')
                   OutlinedButton.icon(
-                    onPressed: () => widget.onViewResults(s.id),
-                    icon: const Icon(Icons.assessment_outlined, size: 16),
+                    onPressed: () => widget.onViewResults(sub.id),
+                    icon: const Icon(Icons.assessment, size: 18),
                     label: const Text('Результаты'),
                   ),
                 OutlinedButton.icon(
-                  onPressed: () => widget.onViewFiles(s.id),
-                  icon: const Icon(Icons.code, size: 16),
-                  label: const Text('Файлы проекта'),
+                  onPressed: () => widget.onViewFiles(sub.id),
+                  icon: const Icon(Icons.code, size: 18),
+                  label: const Text('Код'),
                 ),
-                if (s.status == 'reviewing')
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: const [
-                      SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                      SizedBox(width: 6),
-                      Text('Проверка выполняется...'),
-                    ],
-                  ),
               ],
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
-  }
-
-  Color _statusColor(String status) {
-    switch (status) {
-      case 'completed':
-        return Colors.green;
-      case 'reviewing':
-        return Colors.orange;
-      case 'error':
-        return Colors.red;
-      default:
-        return Colors.blueGrey;
-    }
-  }
-
-  IconData _statusIcon(String status) {
-    switch (status) {
-      case 'completed':
-        return Icons.check_circle_outline;
-      case 'reviewing':
-        return Icons.hourglass_top;
-      case 'error':
-        return Icons.error_outline;
-      default:
-        return Icons.schedule;
-    }
-  }
-
-  String _statusText(String status) {
-    switch (status) {
-      case 'pending':
-        return 'Ожидает проверки';
-      case 'reviewing':
-        return 'Проверяется...';
-      case 'completed':
-        return 'Проверено';
-      case 'error':
-        return 'Ошибка проверки';
-      default:
-        return status;
-    }
   }
 }

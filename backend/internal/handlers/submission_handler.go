@@ -3,8 +3,10 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -20,24 +22,34 @@ import (
 type SubmissionHandler struct {
 	submissionRepo   *repository.SubmissionRepo
 	assignmentRepo   *repository.AssignmentRepo
+	snapshotRepo     *repository.SnapshotRepo
+	userRepo         *repository.UserRepo
 	githubService    *services.GitHubService
-	llmReviewer      services.LLMReviewer
 	ingestionService *ingestion.Service
+	defaultProvider  string
 }
 
 func NewSubmissionHandler(
 	sr *repository.SubmissionRepo,
 	ar *repository.AssignmentRepo,
+	snap *repository.SnapshotRepo,
+	ur *repository.UserRepo,
 	gs *services.GitHubService,
-	llm services.LLMReviewer,
 	ing *ingestion.Service,
 ) *SubmissionHandler {
+	provider := services.NormalizeLLMProvider(os.Getenv("LLM_PROVIDER"))
+	if provider == "" {
+		provider = services.LLMProviderGigaChat
+	}
+
 	return &SubmissionHandler{
 		submissionRepo:   sr,
 		assignmentRepo:   ar,
+		snapshotRepo:     snap,
+		userRepo:         ur,
 		githubService:    gs,
-		llmReviewer:      llm,
 		ingestionService: ing,
+		defaultProvider:  provider,
 	}
 }
 
@@ -57,6 +69,29 @@ func (h *SubmissionHandler) Submit(w http.ResponseWriter, r *http.Request) {
 
 	if req.GithubRepo == "" {
 		writeError(w, "github_repo is required", http.StatusBadRequest)
+		return
+	}
+
+	user, err := h.userRepo.GetByID(userID)
+	if err != nil {
+		writeError(w, "user not found", http.StatusInternalServerError)
+		return
+	}
+	if user.GithubLogin == "" {
+		writeError(w, "Please link your GitHub account first", http.StatusForbidden)
+		return
+	}
+
+	repoPrefix := strings.ToLower(user.GithubLogin)
+
+	urlParts := strings.Split(strings.TrimSuffix(strings.TrimSuffix(req.GithubRepo, "/"), ".git"), "/")
+	var owner string
+	if len(urlParts) >= 2 {
+		owner = urlParts[len(urlParts)-2]
+	}
+
+	if strings.ToLower(owner) != repoPrefix {
+		writeError(w, "You can only submit your own repository", http.StatusBadRequest)
 		return
 	}
 
@@ -80,6 +115,23 @@ func (h *SubmissionHandler) Submit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SubmissionHandler) StartReview(w http.ResponseWriter, r *http.Request) {
+	var req models.StartReviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		writeError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	provider := services.NormalizeLLMProvider(req.LLMProvider)
+	if provider == "" {
+		provider = h.defaultProvider
+	}
+
+	reviewer, err := services.NewLLMReviewer(r.Context(), provider)
+	if err != nil {
+		writeError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	submissionID, err := strconv.ParseInt(mux.Vars(r)["id"], 10, 64)
 	if err != nil {
 		writeError(w, "invalid submission id", http.StatusBadRequest)
@@ -103,14 +155,16 @@ func (h *SubmissionHandler) StartReview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	
+	if err := h.submissionRepo.UpdateLLMProvider(submissionID, provider); err != nil {
+		writeError(w, "failed to save llm provider", http.StatusInternalServerError)
+		return
+	}
+
 	h.submissionRepo.UpdateStatus(submissionID, "reviewing")
 
-	
 	go func() {
 		ctx := context.Background()
 
-		
 		ir, err := h.ingestionService.Ingest(submissionID, submission.GithubRepo)
 		if err != nil {
 			log.Printf("Error during ingestion for submission %d: %v", submissionID, err)
@@ -118,7 +172,18 @@ func (h *SubmissionHandler) StartReview(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		
+		sourceFiles, err := h.snapshotRepo.GetSourceFiles(ir.Snapshot.ID)
+		if err != nil {
+			log.Printf("Error loading source files for submission %d: %v", submissionID, err)
+			h.submissionRepo.UpdateStatus(submissionID, "error")
+			return
+		}
+
+		sourceFileIDByPath := make(map[string]int64, len(sourceFiles))
+		for _, sourceFile := range sourceFiles {
+			sourceFileIDByPath[normalizeFilePath(sourceFile.FilePath)] = sourceFile.ID
+		}
+
 		rc := &services.ReviewContext{
 			ProjectMap: ir.Snapshot.ProjectMap,
 			Summary:    ir.Snapshot.Summary,
@@ -135,24 +200,29 @@ func (h *SubmissionHandler) StartReview(w http.ResponseWriter, r *http.Request) 
 			})
 		}
 
-		
-		result, err := h.llmReviewer.ReviewWithContext(ctx, rc, criteria)
+		result, err := reviewer.ReviewWithContext(ctx, rc, criteria)
 		if err != nil {
 			log.Printf("Error during LLM review for submission %d: %v", submissionID, err)
 			h.submissionRepo.UpdateStatus(submissionID, "error")
 			return
 		}
 
-		
+		reviewMap := make(map[int64]int64)
+		var defaultReviewID int64
 		for _, cr := range result.Results {
 			review := &models.Review{
 				SubmissionID: submissionID,
 				CriteriaID:   cr.CriteriaID,
-				Score:        cr.Score,
+				Score:        int(cr.Score),
 				Comment:      cr.Comment,
 			}
 			if err := h.submissionRepo.SaveReview(review); err != nil {
 				log.Printf("Error saving review for submission %d, criteria %d: %v", submissionID, cr.CriteriaID, err)
+			} else {
+				reviewMap[cr.CriteriaID] = review.ID
+				if defaultReviewID == 0 {
+					defaultReviewID = review.ID
+				}
 			}
 		}
 
@@ -174,23 +244,26 @@ func (h *SubmissionHandler) StartReview(w http.ResponseWriter, r *http.Request) 
 				severity = "info"
 			}
 
-			var criteriaID *int64
-			if f.CriteriaID > 0 {
-				cid := f.CriteriaID
-				criteriaID = &cid
+			rID := defaultReviewID
+			if mapID, ok := reviewMap[f.CriteriaID]; ok {
+				rID = mapID
 			}
 
 			findings = append(findings, models.ReviewFinding{
-				SubmissionID: submissionID,
-				CriteriaID:   criteriaID,
-				FilePath:     f.FilePath,
-				StartLine:    startLine,
-				EndLine:      endLine,
-				Severity:     severity,
-				Title:        strings.TrimSpace(f.Title),
-				Comment:      strings.TrimSpace(f.Comment),
-				Suggestion:   strings.TrimSpace(f.Suggestion),
-				Source:       "llm",
+				ReviewID:    rID,
+				SourceFileID: func() *int64 {
+					if id, ok := sourceFileIDByPath[normalizeFilePath(f.FilePath)]; ok {
+						return &id
+					}
+					return nil
+				}(),
+				StartLine:   startLine,
+				EndLine:     endLine,
+				Severity:    severity,
+				Title:       strings.TrimSpace(f.Title),
+				Comment:     strings.TrimSpace(f.Comment),
+				Suggestion:  strings.TrimSpace(f.Suggestion),
+				Source:      "llm",
 			})
 		}
 
@@ -234,6 +307,7 @@ func (h *SubmissionHandler) GetResults(w http.ResponseWriter, r *http.Request) {
 
 	findings, err := h.submissionRepo.GetFindings(submissionID)
 	if err != nil {
+		log.Printf("ERROR GetFindings for submission %d: %v", submissionID, err)
 		writeError(w, "failed to get findings", http.StatusInternalServerError)
 		return
 	}
@@ -311,6 +385,10 @@ func (h *SubmissionHandler) GetFindings(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, findings)
+}
+
+func normalizeFilePath(path string) string {
+	return strings.ReplaceAll(strings.TrimSpace(path), "\\", "/")
 }
 
 func decodeJSON(r *http.Request, v interface{}) error {

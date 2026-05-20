@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -56,9 +57,9 @@ func (h *AssignmentHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 func (h *AssignmentHandler) List(w http.ResponseWriter, r *http.Request) {
 	userID := r.Context().Value(middleware.UserIDKey).(int64)
-	isTeacher, _ := r.Context().Value(middleware.IsTeacherKey).(bool)
+	role, _ := r.Context().Value(middleware.RoleKey).(string)
 
-	assignments, err := h.assignmentRepo.ListForUser(userID, isTeacher)
+	assignments, err := h.assignmentRepo.ListForUser(userID, role == "teacher")
 	if err != nil {
 		writeError(w, "failed to list assignments", http.StatusInternalServerError)
 		return
@@ -111,7 +112,8 @@ func (h *AssignmentHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 func (h *AssignmentHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	userID := r.Context().Value(middleware.UserIDKey).(int64)
-	isTeacher, _ := r.Context().Value(middleware.IsTeacherKey).(bool)
+	role, _ := r.Context().Value(middleware.RoleKey).(string)
+	isTeacher := role == "teacher"
 
 	id, err := strconv.ParseInt(mux.Vars(r)["id"], 10, 64)
 	if err != nil {
@@ -125,11 +127,11 @@ func (h *AssignmentHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	
 	if isTeacher {
 		submissions, err := h.submissionRepo.ListByAssignment(id)
-		if err == nil {
-			
+		if err != nil {
+			log.Printf("ERROR calling ListByAssignment: %v", err)
+		} else {
 			type assignmentWithSubmissions struct {
 				models.Assignment
 				Submissions []models.Submission `json:"submissions"`

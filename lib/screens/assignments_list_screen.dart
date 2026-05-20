@@ -1,56 +1,34 @@
-import 'package:flutter/material.dart';
-import '../models/models.dart';
-import '../services/api_client.dart';
+﻿import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:go_router/go_router.dart';
+import '../repositories/assignment_repository.dart';
+import '../cubits/assignments_cubit.dart';
+import '../cubits/assignments_state.dart';
+import '../cubits/auth_cubit.dart';
+import '../cubits/auth_state.dart';
 
-class AssignmentsListScreen extends StatefulWidget {
-  final ApiClient apiClient;
-  final void Function(int id) onAssignmentTap;
-  final VoidCallback onCreateAssignment;
-  final VoidCallback onManageGroups;
-  final VoidCallback onLogout;
-
-  const AssignmentsListScreen({
-    super.key,
-    required this.apiClient,
-    required this.onAssignmentTap,
-    required this.onCreateAssignment,
-    required this.onManageGroups,
-    required this.onLogout,
-  });
-
-  @override
-  State<AssignmentsListScreen> createState() => _AssignmentsListScreenState();
-}
-
-class _AssignmentsListScreenState extends State<AssignmentsListScreen> {
-  List<Assignment>? _assignments;
-  bool _loading = true;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final assignments = await widget.apiClient.getAssignments();
-      setState(() => _assignments = assignments);
-    } catch (e) {
-      setState(() => _error = e.toString());
-    } finally {
-      setState(() => _loading = false);
-    }
-  }
+class AssignmentsListScreen extends StatelessWidget {
+  const AssignmentsListScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final user = widget.apiClient.currentUser;
+    return BlocProvider(
+      create: (context) =>
+          AssignmentsCubit(context.read<AssignmentRepository>())
+            ..loadAssignments(),
+      child: const _AssignmentsListView(),
+    );
+  }
+}
+
+class _AssignmentsListView extends StatelessWidget {
+  const _AssignmentsListView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final authState = context.read<AuthCubit>().state;
+    final user = authState is AuthAuthenticated ? authState.user : null;
+    final isTeacher = user?.isTeacher ?? false;
 
     return Scaffold(
       appBar: AppBar(
@@ -59,10 +37,10 @@ class _AssignmentsListScreenState extends State<AssignmentsListScreen> {
           PopupMenuButton<String>(
             onSelected: (value) {
               if (value == 'groups') {
-                widget.onManageGroups();
+                context.go('/groups');
               }
               if (value == 'logout') {
-                widget.onLogout();
+                context.read<AuthCubit>().logout();
               }
             },
             itemBuilder: (context) => [
@@ -72,9 +50,14 @@ class _AssignmentsListScreenState extends State<AssignmentsListScreen> {
                   value: 'user',
                   child: Row(
                     children: [
-                      Icon(user.isTeacher ? Icons.school : Icons.person, size: 18),
+                      Icon(
+                        user.isTeacher ? Icons.school : Icons.person,
+                        size: 18,
+                      ),
                       const SizedBox(width: 8),
-                      Expanded(child: Text(user.name, overflow: TextOverflow.ellipsis)),
+                      Expanded(
+                        child: Text(user.name, overflow: TextOverflow.ellipsis),
+                      ),
                     ],
                   ),
                 ),
@@ -105,68 +88,90 @@ class _AssignmentsListScreenState extends State<AssignmentsListScreen> {
           ),
         ],
       ),
-      body: _buildBody(),
-      floatingActionButton: widget.apiClient.isTeacher
+      body: BlocBuilder<AssignmentsCubit, AssignmentsState>(
+        builder: (context, state) {
+          if (state is AssignmentsInitial || state is AssignmentsLoading) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          if (state is AssignmentsError) {
+            return Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text('Ошибка: ${state.message}'),
+                  const SizedBox(height: 16),
+                  FilledButton(
+                    onPressed: () =>
+                        context.read<AssignmentsCubit>().loadAssignments(),
+                    child: const Text('Повторить'),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          if (state is AssignmentsLoaded) {
+            final assignments = state.assignments;
+
+            if (assignments.isEmpty) {
+              return Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text('Пока нет домашних заданий'),
+                    const SizedBox(height: 16),
+                    OutlinedButton.icon(
+                      onPressed: () =>
+                          context.read<AssignmentsCubit>().loadAssignments(),
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Обновить'),
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            return RefreshIndicator(
+              onRefresh: () =>
+                  context.read<AssignmentsCubit>().loadAssignments(),
+              child: ListView.builder(
+                padding: const EdgeInsets.all(16),
+                itemCount: assignments.length,
+                itemBuilder: (context, i) {
+                  final a = assignments[i];
+                  final groupsText = a.groupNames.isNotEmpty
+                      ? 'Группы: ${a.groupNames.join(", ")}'
+                      : 'Группы не указаны';
+                  return Card(
+                    child: ListTile(
+                      title: Text(
+                        a.title,
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      subtitle: Text(
+                        '$groupsText • ${a.createdAt.toLocal().toString().split(".")[0]}\n${a.description}',
+                      ),
+                      isThreeLine: true,
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () => context.go('/assignments/${a.id}'),
+                    ),
+                  );
+                },
+              ),
+            );
+          }
+
+          return const SizedBox.shrink();
+        },
+      ),
+      floatingActionButton: isTeacher
           ? FloatingActionButton.extended(
-              onPressed: widget.onCreateAssignment,
+              onPressed: () => context.go('/assignments/create'),
               icon: const Icon(Icons.add),
               label: const Text('Создать ДЗ'),
             )
           : null,
     );
-  }
-
-  Widget _buildBody() {
-    if (_loading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    if (_error != null) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text('Ошибка: $_error'),
-            const SizedBox(height: 16),
-            FilledButton(onPressed: _load, child: const Text('Повторить')),
-          ],
-        ),
-      );
-    }
-
-    if (_assignments == null || _assignments!.isEmpty) {
-      return const Center(
-        child: Text('Пока нет домашних заданий'),
-      );
-    }
-
-    return RefreshIndicator(
-      onRefresh: _load,
-      child: ListView.builder(
-        padding: const EdgeInsets.all(16),
-        itemCount: _assignments!.length,
-        itemBuilder: (context, i) {
-          final a = _assignments![i];
-          final groupsText = a.groupNames.isNotEmpty
-              ? 'Группы: ${a.groupNames.join(', ')}'
-              : 'Группы не указаны';
-          return Card(
-            child: ListTile(
-              title: Text(a.title, style: const TextStyle(fontWeight: FontWeight.bold)),
-              subtitle: Text(
-                '${a.teacherName} • ${_formatDate(a.createdAt)}\n$groupsText',
-              ),
-              isThreeLine: true,
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => widget.onAssignmentTap(a.id),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  String _formatDate(DateTime dt) {
-    return '${dt.day.toString().padLeft(2, '0')}.${dt.month.toString().padLeft(2, '0')}.${dt.year}';
   }
 }

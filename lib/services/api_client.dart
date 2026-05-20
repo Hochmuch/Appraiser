@@ -6,10 +6,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/models.dart';
 
 class ApiClient {
-  
   static const String _definedBaseUrl = String.fromEnvironment('API_BASE_URL');
 
-  
   static String get baseUrl {
     if (_definedBaseUrl.isNotEmpty) {
       return _definedBaseUrl;
@@ -37,8 +35,6 @@ class ApiClient {
     if (_token != null) 'Authorization': 'Bearer $_token',
   };
 
-  
-
   Future<User> register(
     String email,
     String password,
@@ -53,7 +49,7 @@ class ApiClient {
             'email': email,
             'password': password,
             'name': name,
-            'is_teacher': isTeacher,
+            'role': isTeacher ? 'teacher' : 'student',
           }),
         )
         .timeout(_requestTimeout);
@@ -112,8 +108,6 @@ class ApiClient {
       return false;
     }
   }
-
-  
 
   Future<List<Assignment>> getAssignments() async {
     final resp = await http
@@ -177,8 +171,6 @@ class ApiClient {
     return Assignment.fromJson(jsonDecode(resp.body));
   }
 
-  
-
   Future<List<Group>> getMyGroups() async {
     final resp = await http
         .get(Uri.parse('$baseUrl/groups'), headers: _headers)
@@ -200,6 +192,14 @@ class ApiClient {
     return Group.fromJson(jsonDecode(resp.body));
   }
 
+  Future<Group> joinGroupByInviteCode(String inviteCode) async {
+    final resp = await http
+        .post(Uri.parse('$baseUrl/groups/join/$inviteCode'), headers: _headers)
+        .timeout(_requestTimeout);
+    if (resp.statusCode != 200) throw ApiException(_parseError(resp.body));
+    return Group.fromJson(jsonDecode(resp.body));
+  }
+
   Future<Group> addStudentsToGroup(
     int groupId,
     List<String> studentEmails,
@@ -214,8 +214,6 @@ class ApiClient {
     if (resp.statusCode != 200) throw ApiException(_parseError(resp.body));
     return Group.fromJson(jsonDecode(resp.body));
   }
-
-  
 
   Future<Submission> submitAssignment(
     int assignmentId,
@@ -232,11 +230,24 @@ class ApiClient {
     return Submission.fromJson(jsonDecode(resp.body));
   }
 
-  Future<void> startReview(int submissionId) async {
+  Future<void> startReview(
+    int submissionId, {
+    String? llmProvider,
+    String? llmModel,
+  }) async {
+    final body = <String, dynamic>{};
+    if (llmProvider != null && llmProvider.trim().isNotEmpty) {
+      body['llm_provider'] = llmProvider.trim();
+    }
+    if (llmModel != null && llmModel.trim().isNotEmpty) {
+      body['llm_model'] = llmModel.trim();
+    }
+
     final resp = await http
         .post(
           Uri.parse('$baseUrl/submissions/$submissionId/review'),
           headers: _headers,
+          body: jsonEncode(body),
         )
         .timeout(_requestTimeout);
     if (resp.statusCode != 202) throw ApiException(_parseError(resp.body));
@@ -281,12 +292,20 @@ class ApiClient {
     return data.map((j) => GitHubRepoFile.fromJson(j)).toList();
   }
 
-  Future<GitHubDeviceStart> startGithubDeviceFlow(bool isTeacher) async {
+  Future<GitHubDeviceStart> startGithubDeviceFlow(
+    bool isTeacher, [
+    String? email,
+  ]) async {
+    final requestBody = {
+      'role': isTeacher ? 'teacher' : 'student',
+      if (email != null) 'email': email,
+    };
+
     final resp = await http
         .post(
           Uri.parse('$baseUrl/auth/github/device/start'),
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'is_teacher': isTeacher}),
+          body: jsonEncode(requestBody),
         )
         .timeout(_requestTimeout);
     if (resp.statusCode != 200) throw ApiException(_parseError(resp.body));
@@ -332,7 +351,10 @@ class ApiClient {
         'id': _currentUser!.id,
         'email': _currentUser!.email,
         'name': _currentUser!.name,
-        'is_teacher': _currentUser!.isTeacher,
+        'role': _currentUser!.role,
+        if (_currentUser!.githubId != null) 'github_id': _currentUser!.githubId,
+        if (_currentUser!.githubLogin != null)
+          'github_login': _currentUser!.githubLogin,
       }),
     );
   }

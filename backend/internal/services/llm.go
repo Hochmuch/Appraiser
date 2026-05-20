@@ -7,9 +7,9 @@ import (
 
 
 type CriteriaResult struct {
-	CriteriaID int64  `json:"criteria_id"`
-	Score      int    `json:"score"`
-	Comment    string `json:"comment"`
+	CriteriaID int64   `json:"criteria_id"`
+	Score      float64 `json:"score"`
+	Comment    string  `json:"comment"`
 }
 
 

@@ -12,20 +12,20 @@ import (
 type contextKey string
 
 const UserIDKey contextKey = "user_id"
-const IsTeacherKey contextKey = "is_teacher"
+const RoleKey contextKey = "role"
 
 func getJWTSecret() []byte {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
-		secret = "dev-secret-change-in-production"
+		secret = "NO_SECRET"
 	}
 	return []byte(secret)
 }
 
-func GenerateToken(userID int64, isTeacher bool) (string, error) {
+func GenerateToken(userID int64, role string) (string, error) {
 	claims := jwt.MapClaims{
-		"user_id":    userID,
-		"is_teacher": isTeacher,
+		"user_id": userID,
+		"role":    role,
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString(getJWTSecret())
@@ -65,19 +65,30 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+
+		// вот эту штуку я обновил во фронтенде, так что надо поменять
 		userID := int64(claims["user_id"].(float64))
-		isTeacher := claims["is_teacher"].(bool)
+		var role string
+		if claims["role"] != nil {
+			role, _ = claims["role"].(string)
+		} else if claims["is_teacher"] != nil { // Fallback for old tokens
+			if isTeacher, _ := claims["is_teacher"].(bool); isTeacher {
+				role = "teacher"
+			} else {
+				role = "student"
+			}
+		}
 
 		ctx := context.WithValue(r.Context(), UserIDKey, userID)
-		ctx = context.WithValue(ctx, IsTeacherKey, isTeacher)
+		ctx = context.WithValue(ctx, RoleKey, role)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 func TeacherOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		isTeacher, ok := r.Context().Value(IsTeacherKey).(bool)
-		if !ok || !isTeacher {
+		role, ok := r.Context().Value(RoleKey).(string)
+		if !ok || role != "teacher" {
 			http.Error(w, `{"error":"teacher access required"}`, http.StatusForbidden)
 			return
 		}

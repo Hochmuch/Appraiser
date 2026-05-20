@@ -1,0 +1,1 @@
+ALTER TABLE reviews ADD CONSTRAINT reviews_submission_id_criteria_id_key UNIQUE (submission_id, criteria_id);

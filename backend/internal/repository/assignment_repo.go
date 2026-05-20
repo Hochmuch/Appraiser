@@ -232,7 +232,6 @@ func (r *AssignmentRepo) Update(assignmentID, teacherID int64, req models.Create
 	}
 	defer tx.Rollback()
 
-	
 	var ownerID int64
 	err = tx.QueryRow(`SELECT teacher_id FROM assignments WHERE id = $1`, assignmentID).Scan(&ownerID)
 	if err != nil {
@@ -242,7 +241,6 @@ func (r *AssignmentRepo) Update(assignmentID, teacherID int64, req models.Create
 		return nil, fmt.Errorf("not the owner of this assignment")
 	}
 
-	
 	a := &models.Assignment{}
 	err = tx.QueryRow(
 		`UPDATE assignments SET title = $1, description = $2
@@ -254,9 +252,8 @@ func (r *AssignmentRepo) Update(assignmentID, teacherID int64, req models.Create
 		return nil, err
 	}
 
-	
 	_, err = tx.Exec(
-		`DELETE FROM review_findings WHERE submission_id IN (
+		`DELETE FROM review_findings WHERE review_id IN (SELECT id FROM reviews WHERE submission_id IN (
 			SELECT id FROM submissions WHERE assignment_id = $1
 		)`, assignmentID)
 	if err != nil {
@@ -287,7 +284,6 @@ func (r *AssignmentRepo) Update(assignmentID, teacherID int64, req models.Create
 		a.Criteria = append(a.Criteria, criteria)
 	}
 
-	
 	_, err = tx.Exec(`DELETE FROM assignment_groups WHERE assignment_id = $1`, assignmentID)
 	if err != nil {
 		return nil, err

@@ -25,13 +25,17 @@ func (r *UserRepo) Create(req models.RegisterRequest) (*models.User, error) {
 		return nil, err
 	}
 
+	if req.Role == "" {
+		req.Role = "student"
+	}
+
 	user := &models.User{}
 	err = r.db.QueryRow(
-		`INSERT INTO users (email, name, password_hash, is_teacher)
+		`INSERT INTO users (email, name, password_hash, role)
 		 VALUES ($1, $2, $3, $4)
-		 RETURNING id, email, name, password_hash, github_id, github_login, is_teacher, created_at`,
-		req.Email, req.Name, string(hash), req.IsTeacher,
-	).Scan(&user.ID, &user.Email, &user.Name, &user.PasswordHash, &user.GithubID, &user.GithubLogin, &user.IsTeacher, &user.CreatedAt)
+		 RETURNING id, email, name, password_hash, github_id, COALESCE(github_login, ''), role, created_at`,
+		req.Email, req.Name, string(hash), req.Role,
+	).Scan(&user.ID, &user.Email, &user.Name, &user.PasswordHash, &user.GithubID, &user.GithubLogin, &user.Role, &user.CreatedAt)
 
 	return user, err
 }
@@ -39,9 +43,14 @@ func (r *UserRepo) Create(req models.RegisterRequest) (*models.User, error) {
 func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
 	user := &models.User{}
 	err := r.db.QueryRow(
-		`SELECT id, email, name, password_hash, github_id, github_login, is_teacher, created_at FROM users WHERE email = $1`,
+		`SELECT
+			id, email, name, password_hash,
+			github_id,
+			COALESCE(github_login, '') as github_login,
+			role, created_at
+		FROM users WHERE email = $1`,
 		email,
-	).Scan(&user.ID, &user.Email, &user.Name, &user.PasswordHash, &user.GithubID, &user.GithubLogin, &user.IsTeacher, &user.CreatedAt)
+	).Scan(&user.ID, &user.Email, &user.Name, &user.PasswordHash, &user.GithubID, &user.GithubLogin, &user.Role, &user.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -51,9 +60,9 @@ func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
 func (r *UserRepo) GetByID(id int64) (*models.User, error) {
 	user := &models.User{}
 	err := r.db.QueryRow(
-		`SELECT id, email, name, password_hash, github_id, github_login, is_teacher, created_at FROM users WHERE id = $1`,
+		`SELECT id, email, name, password_hash, github_id, COALESCE(github_login, ''), role, created_at FROM users WHERE id = $1`,
 		id,
-	).Scan(&user.ID, &user.Email, &user.Name, &user.PasswordHash, &user.GithubID, &user.GithubLogin, &user.IsTeacher, &user.CreatedAt)
+	).Scan(&user.ID, &user.Email, &user.Name, &user.PasswordHash, &user.GithubID, &user.GithubLogin, &user.Role, &user.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -63,17 +72,17 @@ func (r *UserRepo) GetByID(id int64) (*models.User, error) {
 func (r *UserRepo) GetByGitHubID(githubID int64) (*models.User, error) {
 	user := &models.User{}
 	err := r.db.QueryRow(
-		`SELECT id, email, name, password_hash, github_id, github_login, is_teacher, created_at
+		`SELECT id, email, name, password_hash, github_id, COALESCE(github_login, ''), role, created_at
 		 FROM users WHERE github_id = $1`,
 		githubID,
-	).Scan(&user.ID, &user.Email, &user.Name, &user.PasswordHash, &user.GithubID, &user.GithubLogin, &user.IsTeacher, &user.CreatedAt)
+	).Scan(&user.ID, &user.Email, &user.Name, &user.PasswordHash, &user.GithubID, &user.GithubLogin, &user.Role, &user.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
 	return user, nil
 }
 
-func (r *UserRepo) UpsertGitHubUser(email, name string, githubID int64, githubLogin string, isTeacher bool) (*models.User, error) {
+func (r *UserRepo) UpsertGitHubUser(email, name string, githubID int64, githubLogin string, role string) (*models.User, error) {
 	user, err := r.GetByGitHubID(githubID)
 	if err == nil {
 		return user, nil
@@ -106,14 +115,35 @@ func (r *UserRepo) UpsertGitHubUser(email, name string, githubID int64, githubLo
 
 	newUser := &models.User{}
 	err = r.db.QueryRow(
-		`INSERT INTO users (email, name, password_hash, github_id, github_login, is_teacher)
+		`INSERT INTO users (email, name, password_hash, github_id, github_login, role)
 		 VALUES ($1, $2, $3, $4, $5, $6)
-		 RETURNING id, email, name, password_hash, github_id, github_login, is_teacher, created_at`,
-		email, name, string(hash), githubID, githubLogin, isTeacher,
-	).Scan(&newUser.ID, &newUser.Email, &newUser.Name, &newUser.PasswordHash, &newUser.GithubID, &newUser.GithubLogin, &newUser.IsTeacher, &newUser.CreatedAt)
+		 RETURNING id, email, name, password_hash, github_id, COALESCE(github_login, ''), role, created_at`,
+		email, name, string(hash), githubID, githubLogin, role,
+	).Scan(&newUser.ID, &newUser.Email, &newUser.Name, &newUser.PasswordHash, &newUser.GithubID, &newUser.GithubLogin, &newUser.Role, &newUser.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
 
 	return newUser, nil
+}
+
+func (r *UserRepo) LinkGitHubToEmail(email, name string, githubID int64, githubLogin string) (*models.User, error) {
+	user, err := r.GetByEmail(email)
+	if err != nil {
+		return nil, err
+	}
+	if user.GithubID != nil && *user.GithubID != 0 && *user.GithubID != githubID {
+		return nil, fmt.Errorf("github аккаунт уже привязан к другому пользователю")
+	}
+
+	if _, err := r.db.Exec(
+		`UPDATE users
+		 SET github_id = $1, github_login = $2, name = COALESCE(NULLIF(name, ''), $3)
+		 WHERE id = $4`,
+		githubID, githubLogin, name, user.ID,
+	); err != nil {
+		return nil, err
+	}
+
+	return r.GetByID(user.ID)
 }

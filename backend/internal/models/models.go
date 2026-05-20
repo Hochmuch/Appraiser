@@ -9,7 +9,7 @@ type User struct {
 	PasswordHash string    `json:"-"`
 	GithubID     *int64    `json:"github_id,omitempty"`
 	GithubLogin  string    `json:"github_login,omitempty"`
-	IsTeacher    bool      `json:"is_teacher"`
+	Role string `json:"role"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 
@@ -26,11 +26,12 @@ type Assignment struct {
 }
 
 type Group struct {
-	ID        int64         `json:"id"`
-	TeacherID int64         `json:"teacher_id"`
-	Name      string        `json:"name"`
-	Students  []GroupMember `json:"students,omitempty"`
-	CreatedAt time.Time     `json:"created_at"`
+	ID         int64         `json:"id"`
+	TeacherID  int64         `json:"teacher_id"`
+	Name       string        `json:"name"`
+	InviteCode string        `json:"invite_code,omitempty"`
+	Students   []GroupMember `json:"students,omitempty"`
+	CreatedAt  time.Time     `json:"created_at"`
 }
 
 type GroupMember struct {
@@ -52,6 +53,7 @@ type Submission struct {
 	StudentID    int64           `json:"student_id"`
 	StudentName  string          `json:"student_name,omitempty"`
 	GithubRepo   string          `json:"github_repo"`
+	LLMProvider  string          `json:"llm_provider,omitempty"`
 	Status       string          `json:"status"` 
 	Reviews      []Review        `json:"reviews,omitempty"`
 	Findings     []ReviewFinding `json:"findings,omitempty"`
@@ -60,9 +62,9 @@ type Submission struct {
 
 type ReviewFinding struct {
 	ID           int64     `json:"id"`
-	SubmissionID int64     `json:"submission_id"`
-	CriteriaID   *int64    `json:"criteria_id,omitempty"`
-	FilePath     string    `json:"file_path"`
+	ReviewID int64 `json:"review_id"`
+	SourceFileID *int64 `json:"source_file_id,omitempty"`
+	SourceFilePath string `json:"source_file_path,omitempty"`
 	StartLine    int       `json:"start_line"`
 	EndLine      int       `json:"end_line"`
 	Severity     string    `json:"severity"`
@@ -90,7 +92,7 @@ type RegisterRequest struct {
 	Email     string `json:"email"`
 	Password  string `json:"password"`
 	Name      string `json:"name"`
-	IsTeacher bool   `json:"is_teacher"`
+	Role     string `json:"role" validate:"required"`
 }
 
 type LoginRequest struct {
@@ -119,6 +121,10 @@ type SubmitRequest struct {
 	GithubRepo string `json:"github_repo"`
 }
 
+type StartReviewRequest struct {
+	LLMProvider string `json:"llm_provider"`
+}
+
 type CreateGroupRequest struct {
 	Name          string   `json:"name"`
 	StudentEmails []string `json:"student_emails"`
@@ -129,7 +135,8 @@ type AddStudentsRequest struct {
 }
 
 type GitHubDeviceStartRequest struct {
-	IsTeacher bool `json:"is_teacher"`
+	Role  string `json:"role"`
+	Email string `json:"email,omitempty"`
 }
 
 type GitHubDeviceStartResponse struct {

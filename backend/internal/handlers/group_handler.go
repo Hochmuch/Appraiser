@@ -87,3 +87,26 @@ func (h *GroupHandler) AddStudents(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, group)
 }
+
+func (h *GroupHandler) JoinByInviteCode(w http.ResponseWriter, r *http.Request) {
+	userID := r.Context().Value(middleware.UserIDKey).(int64)
+	role, _ := r.Context().Value(middleware.RoleKey).(string)
+	if role != "student" {
+		writeError(w, "only students can join groups", http.StatusForbidden)
+		return
+	}
+
+	inviteCode := mux.Vars(r)["invite_code"]
+	if inviteCode == "" {
+		writeError(w, "invite_code is required", http.StatusBadRequest)
+		return
+	}
+
+	group, err := h.groupRepo.JoinByInviteCode(inviteCode, userID)
+	if err != nil {
+		writeError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, group)
+}

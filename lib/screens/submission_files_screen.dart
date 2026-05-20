@@ -1,52 +1,52 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:highlight/highlight.dart' as highlight;
 
 import '../models/models.dart';
-import '../services/api_client.dart';
+import '../cubits/submission_files_cubit.dart';
+import '../cubits/submission_files_state.dart';
 
-class _FolderNode {
-  final String name;
-  final String path;
-  final Map<String, _FolderNode> folders = {};
-  final List<String> files = [];
-
-  _FolderNode({required this.name, required this.path});
-}
-
-class SubmissionFilesScreen extends StatefulWidget {
-  final ApiClient apiClient;
+class SubmissionFilesScreen extends StatelessWidget {
   final int submissionId;
   final VoidCallback onBack;
 
   const SubmissionFilesScreen({
     super.key,
-    required this.apiClient,
     required this.submissionId,
     required this.onBack,
   });
 
   @override
-  State<SubmissionFilesScreen> createState() => _SubmissionFilesScreenState();
+  Widget build(BuildContext context) {
+    return BlocProvider(
+      create: (context) =>
+          SubmissionFilesCubit(context.read())..loadFiles(submissionId),
+      child: _SubmissionFilesView(submissionId: submissionId, onBack: onBack),
+    );
+  }
 }
 
-class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
-  List<GitHubRepoFile>? _files;
-  Map<String, GitHubRepoFile> _filesByPath = {};
-  Map<String, List<ReviewFinding>> _findingsByFile = {};
-  final Map<String, List<InlineSpan>> _highlightedLinesCache = {};
-  _FolderNode? _root;
-  String? _selectedPath;
-  final Set<String> _expandedDirs = {};
-  final Set<int> _expandedFindings = {}; 
-  final ScrollController _codeScrollController = ScrollController();
-  bool _loading = true;
-  String? _error;
+class _SubmissionFilesView extends StatefulWidget {
+  final int submissionId;
+  final VoidCallback onBack;
+
+  const _SubmissionFilesView({
+    required this.submissionId,
+    required this.onBack,
+  });
 
   @override
-  void initState() {
-    super.initState();
-    _load();
-  }
+  State<_SubmissionFilesView> createState() => _SubmissionFilesViewState();
+}
+
+class _SubmissionFilesViewState extends State<_SubmissionFilesView> {
+  final Map<String, List<InlineSpan>> _highlightedLinesCache = {};
+  String? _selectedPath;
+  final Set<String> _expandedDirs = {};
+  final Set<int> _expandedFindings = {};
+  final ScrollController _codeScrollController = ScrollController();
+
+  String _normalizePath(String path) => path.replaceAll('\\', '/');
 
   @override
   void dispose() {
@@ -54,55 +54,9 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
     super.dispose();
   }
 
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final files = await widget.apiClient.getSubmissionFiles(
-        widget.submissionId,
-      );
-      files.sort(
-        (a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()),
-      );
-      final root = _buildTree(files);
-      final filesByPath = {for (final f in files) f.path: f};
-
-      
-      Map<String, List<ReviewFinding>> findingsByFile = {};
-      try {
-        final submission = await widget.apiClient.getSubmissionResults(
-          widget.submissionId,
-        );
-        for (final f in submission.findings) {
-          findingsByFile.putIfAbsent(f.filePath, () => []).add(f);
-        }
-      } catch (_) {}
-
-      setState(() {
-        _files = files;
-        _root = root;
-        _filesByPath = filesByPath;
-        _findingsByFile = findingsByFile;
-        _highlightedLinesCache.clear();
-        _expandedDirs
-          ..clear()
-          ..add('');
-        for (final dir in root.folders.keys) {
-          _expandedDirs.add(dir);
-        }
-        _selectedPath = files.isNotEmpty ? files.first.path : null;
-      });
-    } catch (e) {
-      setState(() => _error = e.toString());
-    } finally {
-      setState(() => _loading = false);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
+    // ignore: deprecated_member_use
     return WillPopScope(
       onWillPop: () async {
         widget.onBack();
@@ -116,37 +70,70 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
             onPressed: widget.onBack,
           ),
         ),
-        body: _buildBody(),
+        body: BlocConsumer<SubmissionFilesCubit, SubmissionFilesState>(
+          listener: (context, state) {
+            if (state is SubmissionFilesLoaded) {
+              if (_selectedPath == null && state.files.isNotEmpty) {
+                setState(() => _selectedPath = state.files.first.path);
+              }
+              setState(() {
+                _expandedDirs.add('');
+                for (final dir in state.root.folders.keys) {
+                  _expandedDirs.add(dir);
+                }
+              });
+            }
+          },
+          builder: (context, state) {
+            if (state is SubmissionFilesInitial ||
+                state is SubmissionFilesLoading) {
+              return const Center(child: CircularProgressIndicator());
+            }
+
+            if (state is SubmissionFilesError) {
+              return Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Text(
+                        'Ошибка: ${state.message}',
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                    FilledButton(
+                      onPressed: () {
+                        context.read<SubmissionFilesCubit>().loadFiles(
+                          widget.submissionId,
+                        );
+                      },
+                      child: const Text('Повторить'),
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            if (state is SubmissionFilesLoaded) {
+              return _buildBody(state);
+            }
+
+            return const SizedBox.shrink();
+          },
+        ),
       ),
     );
   }
 
-  Widget _buildBody() {
-    if (_loading) return const Center(child: CircularProgressIndicator());
-    if (_error != null) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text('Ошибка: $_error', textAlign: TextAlign.center),
-            ),
-            FilledButton(onPressed: _load, child: const Text('Повторить')),
-          ],
-        ),
-      );
+  Widget _buildBody(SubmissionFilesLoaded state) {
+    if (state.files.isEmpty) {
+      return const Center(child: Text('Файлы не найдены'));
     }
 
-    final files = _files ?? [];
-    if (files.isEmpty) return const Center(child: Text('Файлы не найдены'));
-
-    final root = _root;
-    if (root == null)
-      return const Center(child: Text('Ошибка построения дерева файлов'));
-
     return RefreshIndicator(
-      onRefresh: _load,
+      onRefresh: () =>
+          context.read<SubmissionFilesCubit>().loadFiles(widget.submissionId),
       child: LayoutBuilder(
         builder: (context, constraints) {
           final isWide = constraints.maxWidth >= 900;
@@ -154,18 +141,18 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
           if (isWide) {
             return Row(
               children: [
-                SizedBox(width: 330, child: _buildTreePane(root)),
+                SizedBox(width: 330, child: _buildTreePane(state.root)),
                 const VerticalDivider(width: 1),
-                Expanded(child: _buildFilePane()),
+                Expanded(child: _buildFilePane(state)),
               ],
             );
           }
 
           return Column(
             children: [
-              SizedBox(height: 280, child: _buildTreePane(root)),
+              SizedBox(height: 280, child: _buildTreePane(state.root)),
               const Divider(height: 1),
-              Expanded(child: _buildFilePane()),
+              Expanded(child: _buildFilePane(state)),
             ],
           );
         },
@@ -173,49 +160,7 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
     );
   }
 
-  _FolderNode _buildTree(List<GitHubRepoFile> files) {
-    final root = _FolderNode(name: '', path: '');
-
-    for (final file in files) {
-      final normalized = file.path.replaceAll('\\', '/');
-      final parts = normalized.split('/').where((p) => p.isNotEmpty).toList();
-      if (parts.isEmpty) continue;
-
-      var current = root;
-      for (var i = 0; i < parts.length - 1; i++) {
-        final dirName = parts[i];
-        final dirPath = current.path.isEmpty
-            ? dirName
-            : '${current.path}/$dirName';
-        current = current.folders.putIfAbsent(
-          dirName,
-          () => _FolderNode(name: dirName, path: dirPath),
-        );
-      }
-
-      current.files.add(normalized);
-    }
-
-    _sortTree(root);
-    return root;
-  }
-
-  void _sortTree(_FolderNode node) {
-    node.files.sort(
-      (a, b) =>
-          _fileName(a).toLowerCase().compareTo(_fileName(b).toLowerCase()),
-    );
-    final sortedEntries = node.folders.entries.toList()
-      ..sort((a, b) => a.key.toLowerCase().compareTo(b.key.toLowerCase()));
-    node.folders
-      ..clear()
-      ..addEntries(sortedEntries);
-    for (final child in node.folders.values) {
-      _sortTree(child);
-    }
-  }
-
-  Widget _buildTreePane(_FolderNode root) {
+  Widget _buildTreePane(FolderNode root) {
     return Container(
       color: const Color(0xFF161616),
       child: ListView(
@@ -228,7 +173,7 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
               style: TextStyle(
                 fontWeight: FontWeight.w600,
                 fontSize: 11,
-                color: Colors.white.withOpacity(0.4),
+                color: const Color.fromRGBO(255, 255, 255, 0.4),
                 letterSpacing: 0.8,
               ),
             ),
@@ -239,7 +184,7 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
     );
   }
 
-  List<Widget> _buildTreeItems(_FolderNode node, {required int depth}) {
+  List<Widget> _buildTreeItems(FolderNode node, {required int depth}) {
     final widgets = <Widget>[];
     const double baseIndent = 8.0;
     const double levelIndent = 14.0;
@@ -301,9 +246,8 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
 
     for (final path in node.files) {
       final selected = path == _selectedPath;
-      final fileFindings = _findingsByFile[path] ?? [];
-      final badgeCount = fileFindings.length;
-      
+      final badgeCount = _findingsCountForPath(path);
+
       final leftPad = baseIndent + depth * levelIndent + 19.0;
 
       widgets.add(
@@ -311,7 +255,7 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
           onTap: () => setState(() => _selectedPath = path),
           child: Container(
             height: rowHeight,
-            color: selected ? Colors.white.withOpacity(0.08) : null,
+            color: selected ? const Color.fromRGBO(255, 255, 255, 0.08) : null,
             padding: EdgeInsets.only(left: leftPad, right: 8),
             child: Row(
               children: [
@@ -330,7 +274,7 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
                       height: 1,
                       color: selected
                           ? Colors.white
-                          : Colors.white.withOpacity(0.75),
+                          : const Color.fromRGBO(255, 255, 255, 0.75),
                     ),
                   ),
                 ),
@@ -342,7 +286,7 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
                       vertical: 1,
                     ),
                     decoration: BoxDecoration(
-                      color: _worstSeverityColor(fileFindings),
+                      color: Colors.orangeAccent,
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Text(
@@ -364,24 +308,29 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
     return widgets;
   }
 
-  Widget _buildFilePane() {
+  Widget _buildFilePane(SubmissionFilesLoaded state) {
     final selectedPath = _selectedPath;
     if (selectedPath == null) {
       return const Center(child: Text('Выберите файл в дереве'));
     }
 
-    final file = _filesByPath[selectedPath];
+    final file = state.filesByPath[selectedPath];
     if (file == null) {
       return const Center(child: Text('Файл не найден'));
     }
 
-    final fileFindings = _findingsByFile[selectedPath] ?? [];
+    final fileFindings = state.findings
+        .where(
+          (f) =>
+              f.sourceFilePath.isNotEmpty &&
+              _normalizePath(f.sourceFilePath) == _normalizePath(file.path),
+        )
+        .toList(growable: false);
     final lines = file.content.split('\n');
-  final highlightedLines = _getHighlightedLines(file.path, file.content);
+    final highlightedLines = _getHighlightedLines(file.path, file.content);
 
-    
     final Map<int, List<ReviewFinding>> findingsAtLine = {};
-    
+
     final Map<int, String> severityByLine = {};
     for (final f in fileFindings) {
       findingsAtLine.putIfAbsent(f.startLine, () => []).add(f);
@@ -439,7 +388,7 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
                 padding: const EdgeInsets.symmetric(vertical: 8),
                 itemCount: lines.length,
                 itemBuilder: (context, index) {
-                  final lineNum = index + 1; 
+                  final lineNum = index + 1;
                   final line = lines[index];
                   final lineSeverity = severityByLine[lineNum];
                   final Color? bg = lineSeverity != null
@@ -488,7 +437,7 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
                           ],
                         ),
                       ),
-                      
+
                       for (final finding in startingFindings)
                         _buildFindingCard(finding),
                     ],
@@ -508,7 +457,12 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
     return Container(
       margin: const EdgeInsets.only(left: 48, right: 4, bottom: 4),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.12),
+        color: Color.fromRGBO(
+          (color.r * 255).round(),
+          (color.g * 255).round(),
+          (color.b * 255).round(),
+          0.12,
+        ),
         border: Border(left: BorderSide(color: color, width: 3)),
         borderRadius: const BorderRadius.only(
           topRight: Radius.circular(4),
@@ -601,21 +555,23 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
 
     final language = _highlightLanguageForPath(path);
     final lines = content.split('\n');
-    final highlighted = lines.map((line) {
-      if (line.isEmpty) {
-        return const TextSpan(text: '');
-      }
+    final highlighted = lines
+        .map((line) {
+          if (line.isEmpty) {
+            return const TextSpan(text: '');
+          }
 
-      try {
-        final result = highlight.highlight.parse(line, language: language);
-        return TextSpan(
-          style: _codeTextStyle,
-          children: _highlightNodesToSpans(result.nodes, _codeTextStyle),
-        );
-      } catch (_) {
-        return TextSpan(text: line, style: _codeTextStyle);
-      }
-    }).toList(growable: false);
+          try {
+            final result = highlight.highlight.parse(line, language: language);
+            return TextSpan(
+              style: _codeTextStyle,
+              children: _highlightNodesToSpans(result.nodes, _codeTextStyle),
+            );
+          } catch (_) {
+            return TextSpan(text: line, style: _codeTextStyle);
+          }
+        })
+        .toList(growable: false);
 
     _highlightedLinesCache[path] = highlighted;
     return highlighted;
@@ -636,12 +592,7 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
       );
 
       if (node.value != null) {
-        spans.add(
-          TextSpan(
-            text: node.value,
-            style: nodeStyle,
-          ),
-        );
+        spans.add(TextSpan(text: node.value, style: nodeStyle));
       } else if (node.children != null && node.children!.isNotEmpty) {
         spans.add(
           TextSpan(
@@ -674,7 +625,9 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
     if (lower.endsWith('.sql')) return 'sql';
     if (lower.endsWith('.xml')) return 'xml';
     if (lower.endsWith('.c') || lower.endsWith('.h')) return 'c';
-    if (lower.endsWith('.cpp') || lower.endsWith('.cc') || lower.endsWith('.hpp')) {
+    if (lower.endsWith('.cpp') ||
+        lower.endsWith('.cc') ||
+        lower.endsWith('.hpp')) {
       return 'cpp';
     }
     return null;
@@ -700,7 +653,10 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
         return const TextStyle(color: Color(0xFFF78C6C));
       case 'comment':
       case 'quote':
-        return const TextStyle(color: Color(0xFF5C6370), fontStyle: FontStyle.italic);
+        return const TextStyle(
+          color: Color(0xFF5C6370),
+          fontStyle: FontStyle.italic,
+        );
       case 'type':
       case 'class':
       case 'title.class_':
@@ -737,11 +693,11 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
   Color _severityBgColor(String severity) {
     switch (severity) {
       case 'error':
-        return Colors.red.withOpacity(0.15);
+        return const Color.fromRGBO(255, 0, 0, 0.15);
       case 'warning':
-        return Colors.orange.withOpacity(0.12);
+        return const Color.fromRGBO(255, 165, 0, 0.12);
       default:
-        return Colors.blue.withOpacity(0.10);
+        return const Color.fromRGBO(33, 150, 243, 0.10);
     }
   }
 
@@ -781,5 +737,20 @@ class _SubmissionFilesScreenState extends State<SubmissionFilesScreen> {
     final idx = path.lastIndexOf('/');
     if (idx == -1) return path;
     return path.substring(idx + 1);
+  }
+
+  int _findingsCountForPath(String path) {
+    final state = context.read<SubmissionFilesCubit>().state;
+    if (state is! SubmissionFilesLoaded) {
+      return 0;
+    }
+
+    final normalizedPath = _normalizePath(path);
+    return state.findings.where((f) {
+      if (f.sourceFilePath.isEmpty) {
+        return false;
+      }
+      return _normalizePath(f.sourceFilePath) == normalizedPath;
+    }).length;
   }
 }

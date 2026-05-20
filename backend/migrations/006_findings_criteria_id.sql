@@ -1,2 +1,0 @@
-ALTER TABLE review_findings
-    ADD COLUMN IF NOT EXISTS criteria_id BIGINT REFERENCES criteria(id) ON DELETE SET NULL;
